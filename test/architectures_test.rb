@@ -24,6 +24,93 @@ class ArchitecturesTest < ArchSpecTest
     end
   end
 
+  def test_strict_and_vanilla_rails_forbid_record_references_from_views
+    with_project do |root|
+      write "#{root}/app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base; end\n"
+      write "#{root}/app/models/user.rb", "class User < ApplicationRecord; end\n"
+      write "#{root}/app/views/users/index.html.erb", "<h1>Users</h1>\n<%= User.count %>\n<%= User.active.count %>\n<%= User.new %>\n"
+
+      %i[rails_strict vanilla_rails].each do |preset|
+        definition = ArchSpec.define { architecture preset }
+        diagnostics = diagnostics_for(definition, root)
+
+        assert_equal ['dependencies.forbid'] * 3, diagnostics.map(&:rule), preset.to_s
+        assert_equal ['views must not depend on records'] * 3, diagnostics.map(&:message)
+        assert_equal "#{root}/app/views/users/index.html.erb", diagnostics.first.location.path
+        assert_equal [2, 3, 4], diagnostics.map { |diagnostic| diagnostic.location.line }
+      end
+
+      definition = ArchSpec.define do
+        architecture :rails
+        component :views, in: 'app/views/**/*.erb'
+      end
+      assert_empty diagnostics_for(definition, root)
+    end
+  end
+
+  def test_strict_and_vanilla_rails_allow_views_to_use_assigned_objects_and_helpers
+    with_project do |root|
+      write "#{root}/app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base; end\n"
+      write "#{root}/app/models/user.rb", "class User < ApplicationRecord; end\n"
+      write "#{root}/app/models/current.rb", "class Current < ActiveSupport::CurrentAttributes; end\n"
+      write "#{root}/app/models/presenter.rb", "class Presenter; def self.count = 1; end\n"
+      write "#{root}/app/helpers/users_helper.rb", "module UsersHelper; end\n"
+      write "#{root}/app/views/users/show.html.erb", <<~ERB
+        <%= @user.name %>
+        <%= UsersHelper.display(@user) %>
+        <%= Current.user %>
+        <%= Presenter.count %>
+        <%= @user.update(name: "New name") %>
+      ERB
+
+      %i[rails_strict vanilla_rails].each do |preset|
+        definition = ArchSpec.define { architecture preset }
+        assert_empty diagnostics_for(definition, root), preset.to_s
+      end
+    end
+  end
+
+  def test_strict_and_vanilla_rails_respect_custom_view_components
+    with_project do |root|
+      write "#{root}/app/models/user.rb", "class User < CustomRecord; end\n"
+      write "#{root}/templates/users.erb", '<%= User.count %>'
+      write "#{root}/app/views/users/index.html.erb", '<%= User.count %>'
+
+      %i[rails_strict vanilla_rails].each do |preset|
+        components = {
+          'controllers' => 'app/controllers/**/*.rb',
+          'models' => 'app/models/**/*.rb',
+          'records' => { descendants_of: 'CustomRecord' },
+          'views' => { in: 'templates/**/*.erb' }
+        }
+        definition = ArchSpec.define { architecture preset, components: components }
+        diagnostics = diagnostics_for(definition, root)
+
+        assert_equal ['dependencies.forbid'], diagnostics.map(&:rule), preset.to_s
+        assert_equal "#{root}/templates/users.erb", diagnostics.first.location.path
+
+        components.delete('views')
+        definition = ArchSpec.define { architecture preset, components: components }
+        refute definition.component_specs.key?(:views)
+        assert_empty diagnostics_for(definition, root)
+      end
+    end
+  end
+
+  def test_strict_and_vanilla_rails_allow_omitting_records
+    with_project do |root|
+      write "#{root}/app/models/user.rb", "class User < ApplicationRecord; end\n"
+      write "#{root}/app/views/users/index.html.erb", "<%= User.count %>\n<%= User.recent %>\n"
+
+      %i[rails_strict vanilla_rails].each do |preset|
+        components = ArchSpec::Architectures::DEFAULT_RAILS_WITH_ERB_VIEWS.reject { |name, _| name == :records }
+        definition = ArchSpec.define { architecture preset, components: components }
+        assert definition.component_specs.key?(:views)
+        assert_empty diagnostics_for(definition, root), preset.to_s
+      end
+    end
+  end
+
   def test_rails_strict_flags_concern_referencing_its_includer
     with_project do |root|
       write "#{root}/app/models/concerns/chargeable.rb", <<~RUBY
@@ -49,6 +136,40 @@ class ArchitecturesTest < ArchSpecTest
         diagnostic.rule == 'concerns.independence' &&
           diagnostic.message == 'Chargeable must not reference its includer Order'
       end)
+    end
+  end
+
+  def test_vanilla_rails_allows_shared_helpers_renderers_and_coupled_concerns
+    with_project do |root|
+      write "#{root}/app/helpers/excerpt_helper.rb", "module ExcerptHelper; end\n"
+      write "#{root}/app/controllers/application_controller.rb", "class ApplicationController; end\n"
+      write "#{root}/app/models/concerns/chargeable.rb", "module Chargeable; def owner = Account; end\n"
+      write "#{root}/app/models/account.rb", <<~RUBY
+        class Account
+          include ExcerptHelper
+          include Chargeable
+          def renderer = ApplicationController.renderer
+        end
+      RUBY
+
+      definition = ArchSpec.define { architecture :vanilla_rails }
+      assert_empty diagnostics_for(definition, root)
+
+      definition = ArchSpec.define do
+        architecture :vanilla_rails, share_helpers: false, concerns: 'app/**/concerns/**/*.rb'
+      end
+      assert_equal %w[concerns.independence dependencies.forbid], diagnostics_for(definition, root).map(&:rule).sort
+
+      definition = ArchSpec.define { architecture :rails_strict }
+      assert_includes diagnostics_for(definition, root).map(&:message), 'models must not depend on controllers'
+    end
+  end
+
+  def test_vanilla_rails_keeps_controller_only_calls_out_of_models
+    with_project do |root|
+      write "#{root}/app/models/account.rb", "class Account; def page = render(:show); end\n"
+      definition = ArchSpec.define { architecture :vanilla_rails }
+      assert_equal ['models must not call #render'], diagnostics_for(definition, root).map(&:message)
     end
   end
 

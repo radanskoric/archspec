@@ -34,8 +34,14 @@ architecture :vanilla_rails
 ```
 {: data-title="Archspec.rb"}
 
-This runs the [Rails]({% link _architectures/rails.md %}) checks,
-then requires these directories to stay empty, using the
+This defines conventional Rails components, forbids ERB views from referencing
+records (ApplicationRecord descendants), and keeps controller-only calls out
+of models and services.
+Models may use helpers and controller rendering infrastructure; concern
+independence is opt-in. See the [preset options]({% link _architectures/vanilla-rails.md %})
+for configuration and the limits of reference detection.
+
+It also requires these directories to stay empty, using the
 [components rule]({% link _rules/components.md %}):
 
 | Directory        | Reason                                          |

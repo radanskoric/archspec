@@ -14,11 +14,13 @@ module ArchSpec
   # - +:rails+: conventional MVC that keeps controller APIs out of models and
   #   services. Options +components:+, +controller_api:+, +share_helpers:+.
   # - +:rails_strict+: +:rails+ plus a cycle check and a concern independence
-  #   check. Adds option +concerns:+.
-  # - +:vanilla_rails+: +:rails+ plus empty-directory rules for the 37signals
-  #   style (forbidding +app/services+, +app/forms+, +app/policies+, and more)
-  #   and the concern independence check. Options +components:+, +empty:+,
-  #   +controller_api:+, +share_helpers:+, +concerns:+.
+  #   check, plus views that cannot depend on records (ApplicationRecord
+  #   descendants). Adds option +concerns:+.
+  # - +:vanilla_rails+: conventional Rails components and empty-directory rules
+  #   for the 37signals style, plus views that cannot depend on records.
+  #   Models may share helpers and reference controllers; concern independence
+  #   is opt-in. Options +components:+, +empty:+, +controller_api:+,
+  #   +share_helpers:+, +concerns:+.
   # - +:layered+: ordered layers that may only depend inward, with a cycle
   #   check. Option +layers:+ (order matters).
   # - +:hexagonal+: ports and adapters, keeping the domain away from adapters.
@@ -55,6 +57,11 @@ module ArchSpec
       jobs: 'app/jobs/**/*.rb',
       services: 'app/services/**/*.rb'
     }.freeze
+
+    DEFAULT_RAILS_WITH_ERB_VIEWS = DEFAULT_RAILS_MVC.merge(
+      views: 'app/views/**/*.erb',
+      records: { descendants_of: 'ApplicationRecord' }.freeze
+    ).freeze
 
     DEFAULT_HEXAGONAL = {
       application: %w[app/services/**/*.rb app/use_cases/**/*.rb],
@@ -114,17 +121,17 @@ module ArchSpec
         share_helpers: false
       },
       rails_strict: {
-        components: DEFAULT_RAILS_MVC,
+        components: DEFAULT_RAILS_WITH_ERB_VIEWS,
         controller_api: CONTROLLER_METHODS,
         share_helpers: false,
         concerns: DEFAULT_CONCERNS
       },
       vanilla_rails: {
-        components: DEFAULT_RAILS_MVC,
+        components: DEFAULT_RAILS_WITH_ERB_VIEWS,
         empty: VANILLA_RAILS_EMPTY,
         controller_api: CONTROLLER_METHODS,
-        share_helpers: false,
-        concerns: DEFAULT_CONCERNS
+        share_helpers: true,
+        concerns: false
       },
       layered: { layers: DEFAULT_LAYERED },
       hexagonal: DEFAULT_HEXAGONAL,
@@ -169,12 +176,30 @@ module ArchSpec
     def rails_strict(dsl, components:, controller_api:, share_helpers:, concerns:)
       components = normalize_map(components)
       rails(dsl, components: components, controller_api: controller_api, share_helpers: share_helpers)
+      if components.key?(:views) && components.key?(:records)
+        proxy_for(dsl, :views).cannot_use(:records)
+      end
       dsl.no_cycles(among: components.keys)
       independent_concerns(dsl, concerns)
     end
 
     def vanilla_rails(dsl, components:, empty:, controller_api:, share_helpers:, concerns:)
-      rails(dsl, components: components, controller_api: controller_api, share_helpers: share_helpers)
+      components = normalize_map(components)
+      missing = %i[controllers models] - components.keys
+      unless missing.empty?
+        raise Error, "the rails architectures need controllers and models components, missing: #{missing.join(', ')}"
+      end
+
+      define_components(dsl, components)
+      proxy_for(dsl, :controllers).can_only_use(*components.keys & %i[models services helpers mailers jobs])
+      (%i[models services] & components.keys).each do |name|
+        proxy = proxy_for(dsl, name)
+        proxy.cannot_use(:helpers) if !share_helpers && components.key?(:helpers)
+        proxy.cannot_call(*controller_api, receiver: :none) unless controller_api.empty?
+      end
+      if components.key?(:views) && components.key?(:records)
+        proxy_for(dsl, :views).cannot_use(:records)
+      end
 
       empty.each do |name, (pattern, reason)|
         dsl.component(name, in: pattern).must_be_empty(because: reason)

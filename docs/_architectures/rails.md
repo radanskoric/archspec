@@ -40,6 +40,19 @@ architecture :rails, controller_api: %i[render redirect_to session cookies flash
 ## Strict
 
 `rails_strict` adds a cycle check across the Rails components and a concern independence check on `app/**/concerns/**/*.rb`.
+It also defines `views` from `app/views/**/*.erb` and `records` using
+`descendants_of: 'ApplicationRecord'`, alongside the directory-based `models`
+component. Views cannot depend on records: `User.count`, `User.active.count`,
+and even `User.new` produce `dependencies.forbid` violations when `User` is an
+ApplicationRecord descendant. There are no method-level exceptions.
+
+References to non-record classes such as `Current` remain allowed. Calls on
+controller-assigned objects such as `@user` are not type-inferred, so this rule
+does not comprehensively prevent database access from views.
+
+Override view paths through `components:`. As with other components, this
+option replaces the default component map; omitting `views` or `records` omits
+the view-to-record rule. Override the `records` selector to use another base class.
 
 ```ruby
 architecture :rails_strict

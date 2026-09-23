@@ -54,6 +54,17 @@ end
 
 FileUtils.cp(config_source, File.join(checkout, 'Archspec.rb'))
 
+if app_name == 'fizzy'
+  definition = ArchSpec.define { architecture :vanilla_rails }
+  graph = ArchSpec::Analyzer.analyze(definition, root: checkout)
+  violations = ArchSpec::Evaluator.evaluate(definition, graph)
+  unless violations.empty?
+    violations.each { |violation| warn "#{violation.rule}: #{violation.message}" }
+    abort 'Fizzy must pass the default vanilla_rails architecture without exceptions'
+  end
+  puts 'default vanilla_rails: no violations'
+end
+
 output = StringIO.new
 started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 status = Dir.chdir(checkout) { ArchSpec::CLI.run(['check', '--format', 'json'], output: output, error: $stderr) }
